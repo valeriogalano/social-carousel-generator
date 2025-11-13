@@ -1,4 +1,4 @@
-# social-carousel-generator
+# Social Carousel Generator
 
 Script Python per generare un carousel: legge i testi da un file Markdown e li incolla sulle immagini in una cartella `slides`, salvando i risultati in una cartella `output`.
 
@@ -78,10 +78,10 @@ python generate_carousel.py \
 Opzioni utili:
 
 - `--font-file` path a un font `.ttf`/`.otf` personalizzato
-- `--color` colore del testo (default `#ffffff`)
-- `--highlight-color` colore delle parti evidenziate con il markup `[[...]]` (default `#37b34a`)
-- `--stroke-color` colore del contorno (default `#000000`)
-- `--stroke-width` spessore contorno (default `2`)
+- `--color` colore del testo normale (default `#ffffff`)
+- `--bold-color` colore del testo in grassetto (per `**...**`). Se non impostato, usa `--color`.
+- `--italic-color` colore del testo in corsivo (per `*...*`). Se non impostato, usa `--color`.
+- `--italic-skew` inclinazione del corsivo in gradi (default `12.0`)
 - `--margin` margine interno in px (default `60`)
 - `--max-font-size` dimensione massima font (default `96`)
 - `--min-font-size` dimensione minima font (default `24`)
@@ -96,25 +96,27 @@ Il programma abbina i testi alle immagini in base al numero presente nel nome de
 
 I file elaborati vengono salvati nella cartella di output con lo stesso nome dell'immagine sorgente.
 
-## Evidenziare parole o frasi
+## Stili inline: grassetto e corsivo (tipo Markdown minimale)
 
-Puoi ottenere un effetto di evidenziazione come nell'esempio fornito racchiudendo le parole tra doppie parentesi quadre `[[` e `]]` nel file `texts.md`.
+È possibile controllare lo stile delle parole direttamente nel `texts.md` usando una sintassi in stile Markdown semplificata:
+
+- Grassetto: racchiudi tra `**` → testo disegnato con `--bold-color` (default: `--color`).
+- Corsivo: racchiudi tra `*` → testo inclinato (shear) usando `--italic-color` (default: `--color`).
 
 Esempio `texts.md`:
 
 ```
 # 2
-Lorem [[ipsum dolor]] sit amet, consectetur [[adipiscing]] elit.
+*lorem ipsum dolor* sit amet, consectetur **vestibulum lacinia** elit.
 ```
 
-Nell'immagine generata, “ipsum dolor” e “adipiscing” saranno disegnate con il colore definito in `--highlight-color` (default verde). Le altre parole useranno `--color`.
-
 Note:
-- Non è supportato l'annidamento del markup (`[[ [[ ... ]] ]]`).
-- Il wrapping automatico rispetta l'evidenziazione, mantenendo a capo parole intere.
-- Per ottenere un layout simile allo screenshot, prova: `--align left --valign top` o `--align left --valign center` a seconda del template.
+- Il wrapping automatico rispetta gli stili, mantenendo a capo parole intere.
+- L'effetto corsivo è ottenuto tramite un'inclinazione (shear) dell'immagine del testo; per un risultato perfetto puoi usare un font italic con `--font-file`.
+- Puoi regolare l'inclinazione del corsivo con `--italic-skew` (gradi).
+- Non è più supportato l'highlight `[[...]]` né il contorno/stroke del testo.
 
-Esempio di esecuzione con evidenziazione e allineamento a sinistra:
+Esempio di esecuzione con grassetto verde, corsivo arancione e allineamento a sinistra:
 
 ```bash
 python generate_carousel.py \
@@ -122,7 +124,8 @@ python generate_carousel.py \
   --texts-file assets/texts.md \
   --output-dir output \
   --align left \
-  --highlight-color "#37b34a"
+  --bold-color "#37b34a" \
+  --italic-color "#ff8a00"
 ```
 
 ## Disclaimer

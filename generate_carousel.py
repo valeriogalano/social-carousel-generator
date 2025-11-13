@@ -9,7 +9,7 @@ Uso base:
       --texts-file assets/texts.md \
       --output-dir output
 
-Opzioni aggiuntive: --font-file, --color, --highlight-color, --stroke-color, --stroke-width, --margin, --position
+Opzioni aggiuntive: --font-file, --color, --bold-color, --italic-color, --margin, --align, --valign
 
 Formato atteso del file testi (Markdown):
   # 1
@@ -24,11 +24,9 @@ Nota sul comportamento:
 - Se esiste la sezione numerata nel Markdown ma il testo è vuoto, la slide viene COPIATA così com'è nell'output.
 - Se NON esiste una sezione numerata corrispondente nel Markdown, la slide viene SALTATA (non viene generato alcun file).
 
-Evidenziazione (inline highlight):
-- Puoi evidenziare parole o sequenze di parole racchiudendole tra [[ e ]]. Esempio:
-  "Lorem [[ipsum dolor]] sit amet" → le parole "ipsum dolor" verranno colorate con
-  il colore impostato in --highlight-color (default verde).
-  Non è supportato l'annidamento.
+Stili inline (tipo Markdown minimal):
+- Grassetto: racchiudi tra `**` (es: `Vestibulum **lacinia**`).
+- Corsivo: racchiudi tra `*` (es: `*lorem ipsum dolor*`).
 """
 from __future__ import annotations
 
@@ -36,7 +34,7 @@ import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Iterable
+from typing import Dict, List, Tuple, Iterable, Literal
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -92,14 +90,14 @@ def find_images(slides_dir: Path) -> List[Path]:
 class RenderConfig:
     font_file: str | None
     color: str
-    highlight_color: str
-    stroke_color: str
-    stroke_width: int
+    bold_color: str
+    italic_color: str
     margin: int
     max_font_size: int
     min_font_size: int
     valign: str  # top, center, bottom
     align: str  # left, center
+    italic_skew_deg: float
 
 
 def load_font(cfg: RenderConfig, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -117,49 +115,56 @@ def load_font(cfg: RenderConfig, size: int) -> ImageFont.FreeTypeFont | ImageFon
     return ImageFont.load_default()
 
 
-def _parse_tokens_line(line: str) -> List[Tuple[str, bool]]:
-    """Parsa una riga con markup [[...]] restituendo tokens (word, is_highlight).
-    Lo spazio tra le parole è gestito in fase di wrapping, quindi ogni token è una
-    singola parola (con punteggiatura).
+TokenStyle = Literal["normal", "bold", "italic"]
+
+
+def _parse_tokens_line(line: str) -> List[Tuple[str, TokenStyle]]:
+    """Parsa una riga con markup minimale tipo Markdown.
+    Supporta:
+    - **grassetto**
+    - *corsivo*
+    Restituisce tokens (word, style).
     """
-    tokens: List[Tuple[str, bool]] = []
+    tokens: List[Tuple[str, TokenStyle]] = []
+
+    # Stato semplice: normal/bold/italic, niente annidamento (se annidato, si comporta in modo best-effort)
+    style: TokenStyle = "normal"
+    buf: List[str] = []
     i = 0
-    in_h = False
-    buf = []
     while i < len(line):
-        if line.startswith("[[", i) and not in_h:
-            # flush buffer normale
+        if line.startswith("**", i):
+            # flush corrente
             if buf:
                 for w in "".join(buf).split():
                     if w:
-                        tokens.append((w, False))
+                        tokens.append((w, style))
                 buf = []
-            in_h = True
+            style = "normal" if style == "bold" else ("bold" if style == "normal" else style)
             i += 2
             continue
-        if line.startswith("]]", i) and in_h:
+        if line.startswith("*", i):
             if buf:
                 for w in "".join(buf).split():
                     if w:
-                        tokens.append((w, True))
+                        tokens.append((w, style))
                 buf = []
-            in_h = False
-            i += 2
+            style = "normal" if style == "italic" else ("italic" if style == "normal" else style)
+            i += 1
             continue
         buf.append(line[i])
         i += 1
     if buf:
         for w in "".join(buf).split():
             if w:
-                tokens.append((w, in_h))
+                tokens.append((w, style))
     return tokens
 
 
-def _tokenize_text(text: str) -> List[List[Tuple[str, bool]]]:
+def _tokenize_text(text: str) -> List[List[Tuple[str, TokenStyle]]]:
     """Converte il testo in una lista di paragrafi; ogni paragrafo è lista di tokens.
     Le righe vuote generano paragrafi vuoti (linea vuota nell'output).
     """
-    paragraphs: List[List[Tuple[str, bool]]] = []
+    paragraphs: List[List[Tuple[str, TokenStyle]]] = []
     for raw in text.split("\n"):
         if raw.strip() == "":
             paragraphs.append([])  # linea vuota
@@ -168,61 +173,83 @@ def _tokenize_text(text: str) -> List[List[Tuple[str, bool]]]:
     return paragraphs
 
 
-def _wrap_rich_tokens(draw: ImageDraw.ImageDraw, tokens: Iterable[Tuple[str, bool]], font: ImageFont.ImageFont, max_width: int) -> List[List[Tuple[str, bool]]]:
+def _token_width(draw: ImageDraw.ImageDraw, word: str, font: ImageFont.ImageFont, style: TokenStyle, line_h: int, italic_skew_deg: float) -> float:
+    import math
+    base = draw.textlength(word, font=font)
+    if style == "italic":
+        sh = abs(math.tan(math.radians(italic_skew_deg)))
+        return base + sh * line_h
+    return base
+
+
+def _wrap_rich_tokens(
+    draw: ImageDraw.ImageDraw,
+    tokens: Iterable[Tuple[str, TokenStyle]],
+    font: ImageFont.ImageFont,
+    max_width: int,
+    line_h: int,
+    italic_skew_deg: float,
+) -> List[List[Tuple[str, TokenStyle]]]:
     """Esegue il wrapping di una sequenza di token in righe (liste di token)."""
-    lines: List[List[Tuple[str, bool]]] = []
-    line: List[Tuple[str, bool]] = []
+    lines: List[List[Tuple[str, TokenStyle]]] = []
+    line: List[Tuple[str, TokenStyle]] = []
     width = 0.0
     space_w = draw.textlength(" ", font=font)
-    for word, is_h in tokens:
-        add_w = draw.textlength(word, font=font) + (space_w if line else 0.0)
+    for word, sty in tokens:
+        tw = _token_width(draw, word, font, sty, line_h, italic_skew_deg)
+        add_w = tw + (space_w if line else 0.0)
         if line and width + add_w > max_width:
             lines.append(line)
-            line = [(word, is_h)]
-            width = draw.textlength(word, font=font)
+            line = [(word, sty)]
+            width = _token_width(draw, word, font, sty, line_h, italic_skew_deg)
         else:
             if line:
                 width += space_w
-            width += draw.textlength(word, font=font)
-            line.append((word, is_h))
+            width += tw
+            line.append((word, sty))
     if line or not lines:
         lines.append(line)
     return lines
 
 
-def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[List[Tuple[str, bool]]]:
-    """Effettua wrapping conservando i token evidenziati. Ritorna lista di righe."""
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int, line_h: int, italic_skew_deg: float) -> List[List[Tuple[str, TokenStyle]]]:
+    """Effettua wrapping conservando i token e gli stili. Ritorna lista di righe."""
     paragraphs = _tokenize_text(text)
-    all_lines: List[List[Tuple[str, bool]]] = []
+    all_lines: List[List[Tuple[str, TokenStyle]]] = []
     for para in paragraphs:
         if not para:  # linea vuota
             all_lines.append([])
             continue
-        lines = _wrap_rich_tokens(draw, para, font, max_width)
+        lines = _wrap_rich_tokens(draw, para, font, max_width, line_h, italic_skew_deg)
         all_lines.extend(lines)
     return all_lines
 
 
-def fit_text_in_box(draw: ImageDraw.ImageDraw, text: str, cfg: RenderConfig, box_w: int, box_h: int) -> Tuple[ImageFont.ImageFont, List[List[Tuple[str, bool]]]]:
+def fit_text_in_box(draw: ImageDraw.ImageDraw, text: str, cfg: RenderConfig, box_w: int, box_h: int) -> Tuple[ImageFont.ImageFont, List[List[Tuple[str, TokenStyle]]]]:
     """Riduce la dimensione del font finché il testo wrappato entra nel box.
     Restituisce (font, righe_token).
     """
     size = cfg.max_font_size
     while size >= cfg.min_font_size:
         font = load_font(cfg, size)
-        wrapped_lines = wrap_text(draw, text, font, max_width=box_w)
         # misura blocco
         ascent, descent = getattr(font, "getmetrics", lambda: (size, int(size*0.25)))()
         line_h = ascent + descent
         spacing = int(size * 0.25)
+        wrapped_lines = wrap_text(draw, text, font, max_width=box_w, line_h=line_h, italic_skew_deg=cfg.italic_skew_deg)
         non_empty = [ln for ln in wrapped_lines]
         # calcolo altezza: ogni linea (anche vuota) occupa line_h, tra linee aggiungi spacing
         h = len(non_empty) * line_h + max(0, len(non_empty) - 1) * spacing
         # stima larghezza massima della linea
         max_w = 0
         for ln in wrapped_lines:
-            text_line = " ".join([t for t, _ in ln])
-            max_w = max(max_w, int(draw.textlength(text_line, font=font)))
+            # calcola la larghezza somma dei token (con eventuale skew italico) + spazi
+            lw = 0.0
+            for i, (t, sty) in enumerate(ln):
+                if i:
+                    lw += draw.textlength(" ", font=font)
+                lw += _token_width(draw, t, font, sty, line_h, cfg.italic_skew_deg)
+            max_w = max(max_w, int(lw))
         w = max_w
         if w <= box_w and h <= box_h:
             return font, wrapped_lines
@@ -230,21 +257,26 @@ def fit_text_in_box(draw: ImageDraw.ImageDraw, text: str, cfg: RenderConfig, box
         if size == cfg.min_font_size:
             # prova ultima volta
             font = load_font(cfg, size)
-            wrapped_lines = wrap_text(draw, text, font, max_width=box_w)
             ascent, descent = getattr(font, "getmetrics", lambda: (size, int(size*0.25)))()
             line_h = ascent + descent
             spacing = int(size * 0.25)
+            wrapped_lines = wrap_text(draw, text, font, max_width=box_w, line_h=line_h, italic_skew_deg=cfg.italic_skew_deg)
             h = len(wrapped_lines) * line_h + max(0, len(wrapped_lines) - 1) * spacing
             max_w = 0
             for ln in wrapped_lines:
-                text_line = " ".join([t for t, _ in ln])
-                max_w = max(max_w, int(draw.textlength(text_line, font=font)))
+                lw = 0.0
+                for i, (t, sty) in enumerate(ln):
+                    if i:
+                        lw += draw.textlength(" ", font=font)
+                    lw += _token_width(draw, t, font, sty, line_h, cfg.italic_skew_deg)
+                max_w = max(max_w, int(lw))
             w = max_w
             if w <= box_w and h <= box_h:
                 return font, wrapped_lines
             break
     f = load_font(cfg, cfg.min_font_size)
-    return f, wrap_text(draw, text, f, max_width=box_w)
+    ascent, descent = getattr(f, "getmetrics", lambda: (f.size, int(f.size*0.25)))()
+    return f, wrap_text(draw, text, f, max_width=box_w, line_h=ascent+descent, italic_skew_deg=cfg.italic_skew_deg)
 
 
 def render_on_image(img_path: Path, text: str, out_path: Path, cfg: RenderConfig) -> None:
@@ -274,29 +306,71 @@ def render_on_image(img_path: Path, text: str, out_path: Path, cfg: RenderConfig
     else:
         y = (H - th) // 2
 
-    # Disegna riga per riga, token per token (colorando le parti evidenziate)
+    # Disegna riga per riga, token per token (applicando stili)
     space_w = draw.textlength(" ", font=font)
     for line_tokens in lines:
         # Larghezza effettiva della riga (stringa unita con spazi)
-        line_text = " ".join([t for t, _ in line_tokens])
-        line_w = int(draw.textlength(line_text, font=font))
+        lw = 0.0
+        for i, (t, sty) in enumerate(line_tokens):
+            if i:
+                lw += space_w
+            lw += _token_width(draw, t, font, sty, line_h, cfg.italic_skew_deg)
+        line_w = int(lw)
         if cfg.align == "center":
             x = (W - line_w) // 2
         else:
             x = left_x
 
         # Disegna i token
-        for idx, (tok, is_h) in enumerate(line_tokens):
-            fill_color = cfg.highlight_color if is_h else cfg.color
-            draw.text(
-                (x, y),
-                tok,
-                font=font,
-                fill=fill_color,
-                stroke_width=cfg.stroke_width,
-                stroke_fill=cfg.stroke_color,
-            )
-            x += int(draw.textlength(tok, font=font))
+        for idx, (tok, sty) in enumerate(line_tokens):
+            if sty == "bold":
+                # colore grassetto
+                fill_color = cfg.bold_color
+                # finto bold: multiple pass (senza contorno/stroke)
+                for ox, oy in ((0,0), (1,0), (0,1), (1,1)):
+                    draw.text(
+                        (x+ox, y+oy),
+                        tok,
+                        font=font,
+                        fill=fill_color,
+                    )
+                advance = draw.textlength(tok, font=font)
+            elif sty == "italic":
+                # render su immagine temporanea e shear
+                from PIL import Image as PILImage, ImageDraw as PILImageDraw
+                import math
+                pad = 2
+                tw = int(draw.textlength(tok, font=font))
+                temp_h = line_h + 2 * pad
+                temp_w = tw + 2 * pad
+                temp = PILImage.new("RGBA", (max(1, temp_w), max(1, temp_h)), (0, 0, 0, 0))
+                tdraw = PILImageDraw.Draw(temp)
+                tdraw.text(
+                    (pad, pad),
+                    tok,
+                    font=font,
+                    fill=cfg.italic_color or cfg.color,
+                )
+                sh = math.tan(math.radians(cfg.italic_skew_deg))
+                new_w = int(temp_w + abs(sh) * temp_h)
+                # Affine transform per shear X: (x', y') = (x + sh*y, y)
+                sheared = temp.transform(
+                    (max(1, new_w), max(1, temp_h)),
+                    PILImage.AFFINE,
+                    (1, sh, 0, 0, 1, 0),
+                    resample=PILImage.BICUBIC,
+                )
+                im.alpha_composite(sheared, dest=(int(x), int(y - pad)))
+                advance = _token_width(draw, tok, font, sty, line_h, cfg.italic_skew_deg)
+            else:
+                draw.text(
+                    (x, y),
+                    tok,
+                    font=font,
+                    fill=cfg.color,
+                )
+                advance = draw.textlength(tok, font=font)
+            x += int(advance)
             if idx != len(line_tokens) - 1:
                 x += int(space_w)
         y += line_h + spacing
@@ -314,14 +388,14 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path, help="Cartella di destinazione")
     parser.add_argument("--font-file", type=str, default=None, help="Path ad un font .ttf/.otf personalizzato")
     parser.add_argument("--color", type=str, default="#ffffff", help="Colore del testo (hex o nome)")
-    parser.add_argument("--highlight-color", type=str, default="#37b34a", help="Colore delle parti evidenziate ([[...]]))")
-    parser.add_argument("--stroke-color", type=str, default="#000000", help="Colore contorno testo")
-    parser.add_argument("--stroke-width", type=int, default=2, help="Spessore contorno testo")
+    parser.add_argument("--bold-color", type=str, default=None, help="Colore del testo in grassetto (**...**). Se non impostato, usa --color")
+    parser.add_argument("--italic-color", type=str, default=None, help="Colore del testo in corsivo (*...*). Se non impostato, usa --color")
     parser.add_argument("--margin", type=int, default=60, help="Margine interno (px)")
     parser.add_argument("--max-font-size", type=int, default=96, help="Dimensione massima font")
     parser.add_argument("--min-font-size", type=int, default=24, help="Dimensione minima font")
     parser.add_argument("--valign", choices=["top", "center", "bottom"], default="center", help="Allineamento verticale del blocco testo")
     parser.add_argument("--align", choices=["left", "center"], default="center", help="Allineamento orizzontale delle righe")
+    parser.add_argument("--italic-skew", type=float, default=12.0, help="Inclinazione del corsivo in gradi (shear X)")
 
     args = parser.parse_args()
 
@@ -337,17 +411,21 @@ def main() -> int:
     texts = parse_texts_md(texts_file)
     images = find_images(slides_dir)
 
+    # Colori con fallback
+    bold_color = args.bold_color if args.bold_color else args.color
+    italic_color = args.italic_color if args.italic_color else args.color
+
     cfg = RenderConfig(
         font_file=args.font_file,
         color=args.color,
-        highlight_color=args.highlight_color,
-        stroke_color=args.stroke_color,
-        stroke_width=int(args.stroke_width),
+        bold_color=bold_color,
+        italic_color=italic_color,
         margin=int(args.margin),
         max_font_size=int(args.max_font_size),
         min_font_size=int(args.min_font_size),
         valign=args.valign,
         align=args.align,
+        italic_skew_deg=float(args.italic_skew),
     )
 
     # mappa numero -> path immagine (ultimo vince se duplicati)
