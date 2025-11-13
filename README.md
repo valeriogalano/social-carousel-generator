@@ -135,4 +135,4 @@ your projects.
 
 ## Licenza
 
-Vedi file `LICENSE`.
+See the [LICENSE](LICENSE) file for details.
