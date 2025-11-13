@@ -9,7 +9,7 @@ Uso base:
       --texts-file assets/texts.md \
       --output-dir output
 
-Opzioni aggiuntive: --font-file, --color, --stroke-color, --stroke-width, --margin, --position
+Opzioni aggiuntive: --font-file, --color, --highlight-color, --stroke-color, --stroke-width, --margin, --position
 
 Formato atteso del file testi (Markdown):
   # 1
@@ -23,6 +23,12 @@ Tutto il testo fino al prossimo titolo di livello 1 ("# <numero>") viene associa
 Nota sul comportamento:
 - Se esiste la sezione numerata nel Markdown ma il testo è vuoto, la slide viene COPIATA così com'è nell'output.
 - Se NON esiste una sezione numerata corrispondente nel Markdown, la slide viene SALTATA (non viene generato alcun file).
+
+Evidenziazione (inline highlight):
+- Puoi evidenziare parole o sequenze di parole racchiudendole tra [[ e ]]. Esempio:
+  "Lorem [[ipsum dolor]] sit amet" → le parole "ipsum dolor" verranno colorate con
+  il colore impostato in --highlight-color (default verde).
+  Non è supportato l'annidamento.
 """
 from __future__ import annotations
 
@@ -30,7 +36,7 @@ import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -86,12 +92,14 @@ def find_images(slides_dir: Path) -> List[Path]:
 class RenderConfig:
     font_file: str | None
     color: str
+    highlight_color: str
     stroke_color: str
     stroke_width: int
     margin: int
     max_font_size: int
     min_font_size: int
     valign: str  # top, center, bottom
+    align: str  # left, center
 
 
 def load_font(cfg: RenderConfig, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -109,50 +117,134 @@ def load_font(cfg: RenderConfig, size: int) -> ImageFont.FreeTypeFont | ImageFon
     return ImageFont.load_default()
 
 
-def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
-    lines_out: List[str] = []
-    for paragraph in text.split("\n"):
-        words = paragraph.split()
-        if not words:
-            lines_out.append("")
+def _parse_tokens_line(line: str) -> List[Tuple[str, bool]]:
+    """Parsa una riga con markup [[...]] restituendo tokens (word, is_highlight).
+    Lo spazio tra le parole è gestito in fase di wrapping, quindi ogni token è una
+    singola parola (con punteggiatura).
+    """
+    tokens: List[Tuple[str, bool]] = []
+    i = 0
+    in_h = False
+    buf = []
+    while i < len(line):
+        if line.startswith("[[", i) and not in_h:
+            # flush buffer normale
+            if buf:
+                for w in "".join(buf).split():
+                    if w:
+                        tokens.append((w, False))
+                buf = []
+            in_h = True
+            i += 2
             continue
-        line = words[0]
-        for w in words[1:]:
-            test = f"{line} {w}"
-            wpx = draw.textlength(test, font=font)
-            if wpx <= max_width:
-                line = test
-            else:
-                lines_out.append(line)
-                line = w
-        lines_out.append(line)
-    return "\n".join(lines_out)
+        if line.startswith("]]", i) and in_h:
+            if buf:
+                for w in "".join(buf).split():
+                    if w:
+                        tokens.append((w, True))
+                buf = []
+            in_h = False
+            i += 2
+            continue
+        buf.append(line[i])
+        i += 1
+    if buf:
+        for w in "".join(buf).split():
+            if w:
+                tokens.append((w, in_h))
+    return tokens
 
 
-def fit_text_in_box(draw: ImageDraw.ImageDraw, text: str, cfg: RenderConfig, box_w: int, box_h: int) -> Tuple[ImageFont.ImageFont, str]:
-    """Riduce la dimensione del font finché il testo wrappato entra nel box."""
+def _tokenize_text(text: str) -> List[List[Tuple[str, bool]]]:
+    """Converte il testo in una lista di paragrafi; ogni paragrafo è lista di tokens.
+    Le righe vuote generano paragrafi vuoti (linea vuota nell'output).
+    """
+    paragraphs: List[List[Tuple[str, bool]]] = []
+    for raw in text.split("\n"):
+        if raw.strip() == "":
+            paragraphs.append([])  # linea vuota
+        else:
+            paragraphs.append(_parse_tokens_line(raw))
+    return paragraphs
+
+
+def _wrap_rich_tokens(draw: ImageDraw.ImageDraw, tokens: Iterable[Tuple[str, bool]], font: ImageFont.ImageFont, max_width: int) -> List[List[Tuple[str, bool]]]:
+    """Esegue il wrapping di una sequenza di token in righe (liste di token)."""
+    lines: List[List[Tuple[str, bool]]] = []
+    line: List[Tuple[str, bool]] = []
+    width = 0.0
+    space_w = draw.textlength(" ", font=font)
+    for word, is_h in tokens:
+        add_w = draw.textlength(word, font=font) + (space_w if line else 0.0)
+        if line and width + add_w > max_width:
+            lines.append(line)
+            line = [(word, is_h)]
+            width = draw.textlength(word, font=font)
+        else:
+            if line:
+                width += space_w
+            width += draw.textlength(word, font=font)
+            line.append((word, is_h))
+    if line or not lines:
+        lines.append(line)
+    return lines
+
+
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[List[Tuple[str, bool]]]:
+    """Effettua wrapping conservando i token evidenziati. Ritorna lista di righe."""
+    paragraphs = _tokenize_text(text)
+    all_lines: List[List[Tuple[str, bool]]] = []
+    for para in paragraphs:
+        if not para:  # linea vuota
+            all_lines.append([])
+            continue
+        lines = _wrap_rich_tokens(draw, para, font, max_width)
+        all_lines.extend(lines)
+    return all_lines
+
+
+def fit_text_in_box(draw: ImageDraw.ImageDraw, text: str, cfg: RenderConfig, box_w: int, box_h: int) -> Tuple[ImageFont.ImageFont, List[List[Tuple[str, bool]]]]:
+    """Riduce la dimensione del font finché il testo wrappato entra nel box.
+    Restituisce (font, righe_token).
+    """
     size = cfg.max_font_size
     while size >= cfg.min_font_size:
         font = load_font(cfg, size)
-        wrapped = wrap_text(draw, text, font, max_width=box_w)
-        # misura altezza
-        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=int(size*0.25), stroke_width=cfg.stroke_width)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
+        wrapped_lines = wrap_text(draw, text, font, max_width=box_w)
+        # misura blocco
+        ascent, descent = getattr(font, "getmetrics", lambda: (size, int(size*0.25)))()
+        line_h = ascent + descent
+        spacing = int(size * 0.25)
+        non_empty = [ln for ln in wrapped_lines]
+        # calcolo altezza: ogni linea (anche vuota) occupa line_h, tra linee aggiungi spacing
+        h = len(non_empty) * line_h + max(0, len(non_empty) - 1) * spacing
+        # stima larghezza massima della linea
+        max_w = 0
+        for ln in wrapped_lines:
+            text_line = " ".join([t for t, _ in ln])
+            max_w = max(max_w, int(draw.textlength(text_line, font=font)))
+        w = max_w
         if w <= box_w and h <= box_h:
-            return font, wrapped
+            return font, wrapped_lines
         size = max(cfg.min_font_size, size - 2)
         if size == cfg.min_font_size:
             # prova ultima volta
             font = load_font(cfg, size)
-            wrapped = wrap_text(draw, text, font, max_width=box_w)
-            bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=int(size*0.25), stroke_width=cfg.stroke_width)
-            w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
+            wrapped_lines = wrap_text(draw, text, font, max_width=box_w)
+            ascent, descent = getattr(font, "getmetrics", lambda: (size, int(size*0.25)))()
+            line_h = ascent + descent
+            spacing = int(size * 0.25)
+            h = len(wrapped_lines) * line_h + max(0, len(wrapped_lines) - 1) * spacing
+            max_w = 0
+            for ln in wrapped_lines:
+                text_line = " ".join([t for t, _ in ln])
+                max_w = max(max_w, int(draw.textlength(text_line, font=font)))
+            w = max_w
             if w <= box_w and h <= box_h:
-                return font, wrapped
+                return font, wrapped_lines
             break
-    return load_font(cfg, cfg.min_font_size), wrap_text(draw, text, load_font(cfg, cfg.min_font_size), max_width=box_w)
+    f = load_font(cfg, cfg.min_font_size)
+    return f, wrap_text(draw, text, f, max_width=box_w)
 
 
 def render_on_image(img_path: Path, text: str, out_path: Path, cfg: RenderConfig) -> None:
@@ -164,13 +256,17 @@ def render_on_image(img_path: Path, text: str, out_path: Path, cfg: RenderConfig
     box_w = W - 2 * margin
     box_h = H - 2 * margin
 
-    font, wrapped = fit_text_in_box(draw, text, cfg, box_w, box_h)
+    font, lines = fit_text_in_box(draw, text, cfg, box_w, box_h)
     spacing = int(font.size * 0.25)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing, stroke_width=cfg.stroke_width)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
+    ascent, descent = getattr(font, "getmetrics", lambda: (font.size, int(font.size*0.25)))()
+    line_h = ascent + descent
 
-    x = (W - tw) // 2
+    # calcolo altezza totale
+    th = len(lines) * line_h + max(0, len(lines) - 1) * spacing
+
+    # x base per allineamento a sinistra
+    left_x = margin
+
     if cfg.valign == "top":
         y = margin
     elif cfg.valign == "bottom":
@@ -178,17 +274,32 @@ def render_on_image(img_path: Path, text: str, out_path: Path, cfg: RenderConfig
     else:
         y = (H - th) // 2
 
-    draw.multiline_text(
-        (x, y),
-        wrapped,
-        font=font,
-        fill=cfg.color,
-        align="center",
-        spacing=spacing,
-        stroke_width=cfg.stroke_width,
-        stroke_fill=cfg.stroke_color,
-        anchor=None,
-    )
+    # Disegna riga per riga, token per token (colorando le parti evidenziate)
+    space_w = draw.textlength(" ", font=font)
+    for line_tokens in lines:
+        # Larghezza effettiva della riga (stringa unita con spazi)
+        line_text = " ".join([t for t, _ in line_tokens])
+        line_w = int(draw.textlength(line_text, font=font))
+        if cfg.align == "center":
+            x = (W - line_w) // 2
+        else:
+            x = left_x
+
+        # Disegna i token
+        for idx, (tok, is_h) in enumerate(line_tokens):
+            fill_color = cfg.highlight_color if is_h else cfg.color
+            draw.text(
+                (x, y),
+                tok,
+                font=font,
+                fill=fill_color,
+                stroke_width=cfg.stroke_width,
+                stroke_fill=cfg.stroke_color,
+            )
+            x += int(draw.textlength(tok, font=font))
+            if idx != len(line_tokens) - 1:
+                x += int(space_w)
+        y += line_h + spacing
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # salva come PNG per preservare qualità/testo; mantiene estensione originale se non PNG
@@ -203,12 +314,14 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path, help="Cartella di destinazione")
     parser.add_argument("--font-file", type=str, default=None, help="Path ad un font .ttf/.otf personalizzato")
     parser.add_argument("--color", type=str, default="#ffffff", help="Colore del testo (hex o nome)")
+    parser.add_argument("--highlight-color", type=str, default="#37b34a", help="Colore delle parti evidenziate ([[...]]))")
     parser.add_argument("--stroke-color", type=str, default="#000000", help="Colore contorno testo")
     parser.add_argument("--stroke-width", type=int, default=2, help="Spessore contorno testo")
     parser.add_argument("--margin", type=int, default=60, help="Margine interno (px)")
     parser.add_argument("--max-font-size", type=int, default=96, help="Dimensione massima font")
     parser.add_argument("--min-font-size", type=int, default=24, help="Dimensione minima font")
     parser.add_argument("--valign", choices=["top", "center", "bottom"], default="center", help="Allineamento verticale del blocco testo")
+    parser.add_argument("--align", choices=["left", "center"], default="center", help="Allineamento orizzontale delle righe")
 
     args = parser.parse_args()
 
@@ -227,12 +340,14 @@ def main() -> int:
     cfg = RenderConfig(
         font_file=args.font_file,
         color=args.color,
+        highlight_color=args.highlight_color,
         stroke_color=args.stroke_color,
         stroke_width=int(args.stroke_width),
         margin=int(args.margin),
         max_font_size=int(args.max_font_size),
         min_font_size=int(args.min_font_size),
         valign=args.valign,
+        align=args.align,
     )
 
     # mappa numero -> path immagine (ultimo vince se duplicati)

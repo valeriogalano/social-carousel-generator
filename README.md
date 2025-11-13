@@ -79,12 +79,14 @@ Opzioni utili:
 
 - `--font-file` path a un font `.ttf`/`.otf` personalizzato
 - `--color` colore del testo (default `#ffffff`)
+- `--highlight-color` colore delle parti evidenziate con il markup `[[...]]` (default `#37b34a`)
 - `--stroke-color` colore del contorno (default `#000000`)
 - `--stroke-width` spessore contorno (default `2`)
 - `--margin` margine interno in px (default `60`)
 - `--max-font-size` dimensione massima font (default `96`)
 - `--min-font-size` dimensione minima font (default `24`)
 - `--valign` allineamento verticale del blocco testo: `top|center|bottom` (default `center`)
+- `--align` allineamento orizzontale delle righe: `left|center` (default `center`)
 
 Il programma abbina i testi alle immagini in base al numero presente nel nome del file della slide (es. `1.png` → sezione `# 1`).
 
@@ -93,6 +95,35 @@ Il programma abbina i testi alle immagini in base al numero presente nel nome de
 - Se esiste un testo senza immagine corrispondente, verrà segnalato nel riepilogo finale.
 
 I file elaborati vengono salvati nella cartella di output con lo stesso nome dell'immagine sorgente.
+
+## Evidenziare parole o frasi
+
+Puoi ottenere un effetto di evidenziazione come nell'esempio fornito racchiudendo le parole tra doppie parentesi quadre `[[` e `]]` nel file `texts.md`.
+
+Esempio `texts.md`:
+
+```
+# 2
+Lorem [[ipsum dolor]] sit amet, consectetur [[adipiscing]] elit.
+```
+
+Nell'immagine generata, “ipsum dolor” e “adipiscing” saranno disegnate con il colore definito in `--highlight-color` (default verde). Le altre parole useranno `--color`.
+
+Note:
+- Non è supportato l'annidamento del markup (`[[ [[ ... ]] ]]`).
+- Il wrapping automatico rispetta l'evidenziazione, mantenendo a capo parole intere.
+- Per ottenere un layout simile allo screenshot, prova: `--align left --valign top` o `--align left --valign center` a seconda del template.
+
+Esempio di esecuzione con evidenziazione e allineamento a sinistra:
+
+```bash
+python generate_carousel.py \
+  --slides-dir assets/slides \
+  --texts-file assets/texts.md \
+  --output-dir output \
+  --align left \
+  --highlight-color "#37b34a"
+```
 
 ## Disclaimer
 
