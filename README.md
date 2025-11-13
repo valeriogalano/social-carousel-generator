@@ -94,6 +94,11 @@ Il programma abbina i testi alle immagini in base al numero presente nel nome de
 
 I file elaborati vengono salvati nella cartella di output con lo stesso nome dell'immagine sorgente.
 
+## Disclaimer
+
+This code was developed as a *vibe coding* experiment. It's important to keep this in mind if you decide to use it in
+your projects.
+
 ## Licenza
 
 Vedi file `LICENSE`.
