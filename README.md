@@ -1,5 +1,7 @@
 # Social Carousel Generator
 
+> Vibe Coding experiment — progetto costruito con sviluppo iterativo assistito da AI.
+
 Script Python per generare un carousel: legge i testi da un file Markdown e li incolla sulle immagini in una cartella `slides`, salvando i risultati in una cartella `output`.
 
 ## Requisiti
@@ -128,11 +130,17 @@ python generate_carousel.py \
   --italic-color "#ff8a00"
 ```
 
-## Disclaimer
-
-This code was developed as a *vibe coding* experiment. It's important to keep this in mind if you decide to use it in
-your projects.
-
 ## Licenza
 
 See the [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+  <p>Realizzato con ❤️ da <strong>Valerio Galano</strong></p>
+  <p>
+    <a href="https://valeriogalano.it/">Sito Web</a> |
+    <a href="https://daredevel.com/">Blog</a> |
+    <a href="https://pensieriincodice.it/">Podcast</a>
+  </p>
+</div>
